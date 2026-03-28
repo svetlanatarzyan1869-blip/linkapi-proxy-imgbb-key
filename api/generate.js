@@ -1,13 +1,45 @@
-// /api/generate.js – LinkAPI + ImgBB + In‑memory Cache
+// /api/generate.js – LinkAPI + ImgBB + In‑memory Cache с нормализацией параметров
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
 
 // Простой in-memory кэш (живёт до перезапуска сервера)
 const cache = new Map();
 
-// Функция для создания ключа кэша из параметров запроса
+// Нормализация промпта: удаляем повторяющиеся стили, лишние пробелы, приводим к нижнему регистру
+function normalizePrompt(prompt, style) {
+    let normalized = prompt.trim().toLowerCase();
+    // Если стиль уже есть в промпте, удаляем его, чтобы не дублировать
+    if (style) {
+        const styleLower = style.toLowerCase();
+        normalized = normalized.replace(styleLower, '').replace(/,\s*,/g, ',').trim();
+    }
+    // Удаляем множественные пробелы
+    normalized = normalized.replace(/\s+/g, ' ').trim();
+    return normalized;
+}
+
+// Нормализация JSON персонажей: сортировка полей, удаление лишних пробелов
+function normalizeCharacters(charactersStr) {
+    if (!charactersStr) return '';
+    try {
+        let chars = JSON.parse(charactersStr);
+        if (!Array.isArray(chars)) return charactersStr;
+        // Сортируем по имени, чтобы порядок не влиял на ключ
+        chars.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        // Убираем лишние поля (оставляем только name и url)
+        const normalized = chars.map(({ name, url }) => ({ name: (name || '').trim(), url: (url || '').trim() }));
+        return JSON.stringify(normalized);
+    } catch (e) {
+        console.warn('Failed to parse characters for normalization:', e.message);
+        return charactersStr; // если не JSON, возвращаем как есть
+    }
+}
+
+// Функция для создания ключа кэша из параметров
 function getCacheKey(prompt, characters, style, model) {
-    const str = `${prompt}|${characters}|${style}|${model}`;
+    const normalizedPrompt = normalizePrompt(prompt, style);
+    const normalizedCharacters = normalizeCharacters(characters);
+    const str = `${normalizedPrompt}|${normalizedCharacters}|${(style || '').toLowerCase().trim()}|${(model || '').toLowerCase().trim()}`;
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
         const char = str.charCodeAt(i);
@@ -28,15 +60,15 @@ export default async function handler(req, res) {
     try {
         const { 
             key, 
-            prompt, 
-            characters, 
+            prompt: rawPrompt, 
+            characters: rawCharacters, 
             style, 
             model = 'gemini-3.1-flash-image-preview',
             imgbb_key
         } = req.query;
 
         if (!key) return res.status(400).send('Missing required parameter: key');
-        if (!prompt) return res.status(400).send('Missing required parameter: prompt');
+        if (!rawPrompt) return res.status(400).send('Missing required parameter: prompt');
 
         let finalImgbbKey = imgbb_key;
         if (!finalImgbbKey) {
@@ -45,9 +77,16 @@ export default async function handler(req, res) {
         }
 
         // ------------------------------------------------------
-        // 1️⃣ ПРОВЕРКА КЭША
+        // 1️⃣ НОРМАЛИЗАЦИЯ И ПРОВЕРКА КЭША
         // ------------------------------------------------------
-        const cacheKey = getCacheKey(prompt, characters, style, model);
+        const normalizedPrompt = normalizePrompt(rawPrompt, style);
+        const normalizedCharacters = normalizeCharacters(rawCharacters);
+        const cacheKey = getCacheKey(rawPrompt, rawCharacters, style, model);
+
+        console.log('🔑 Ключ кэша:', cacheKey);
+        console.log('📝 Нормализованный промпт:', normalizedPrompt);
+        console.log('👥 Нормализованные персонажи:', normalizedCharacters);
+
         if (cache.has(cacheKey)) {
             const cachedUrl = cache.get(cacheKey);
             console.log(`📦 Возвращаем из кэша (${cacheKey}): ${cachedUrl}`);
@@ -57,25 +96,25 @@ export default async function handler(req, res) {
         console.log(`🆕 Нет в кэше (${cacheKey}), генерируем новое...`);
 
         // ------------------------------------------------------
-        // 2️⃣ ПАРСИМ ПЕРСОНАЖЕЙ
+        // 2️⃣ ПАРСИМ ПЕРСОНАЖЕЙ (используем оригинальные данные для запроса)
         // ------------------------------------------------------
         let charactersArray = [];
-        if (characters) {
+        if (rawCharacters) {
             try {
-                charactersArray = JSON.parse(characters);
+                charactersArray = JSON.parse(rawCharacters);
             } catch (e) {
                 console.warn('Failed to parse characters:', e.message);
             }
         }
 
-        console.log(`👥 Персонажи: ${charactersArray.map(c => c.name).join(', ')}`);
+        console.log(`👥 Персонажи (исходные): ${charactersArray.map(c => c.name).join(', ')}`);
 
         // ------------------------------------------------------
         // 3️⃣ ЗАПРОС К LINKAPI
         // ------------------------------------------------------
         const messages = [{ 
             role: "user", 
-            content: [{ type: "text", text: prompt }] 
+            content: [{ type: "text", text: rawPrompt }] 
         }];
 
         for (const char of charactersArray) {
