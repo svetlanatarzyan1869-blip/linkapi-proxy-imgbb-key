@@ -1,9 +1,16 @@
-// /api/generate.js – с кэшированием Redis (глобальный кэш, без userId)
-
 import Redis from 'ioredis';
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
-const redis = new Redis(process.env.REDIS_URL); // или KV_URL – Vercel обычно добавляет REDIS_URL
+
+// Подключаемся к Redis, используя KV_URL или REDIS_URL
+const redisUrl = process.env.KV_URL || process.env.REDIS_URL;
+let redis = null;
+if (redisUrl) {
+  redis = new Redis(redisUrl);
+  redis.on('error', (err) => console.warn('Redis connection error:', err.message));
+} else {
+  console.warn('Redis URL not set, caching disabled');
+}
 
 function getCacheKey(prompt, characters, style) {
   let charactersArray = [];
@@ -33,13 +40,15 @@ export default async function handler(req, res) {
 
     const finalImgbbKey = imgbb_key || DEFAULT_IMGBB_KEY;
 
-    // --- КЭШ: проверяем, есть ли уже URL ---
-    const cacheKey = getCacheKey(prompt, characters, style);
+    // --- КЭШ (если Redis доступен) ---
     let cachedUrl = null;
-    try {
-      cachedUrl = await redis.get(cacheKey);
-    } catch (e) {
-      console.warn('Redis read error:', e.message);
+    const cacheKey = getCacheKey(prompt, characters, style);
+    if (redis) {
+      try {
+        cachedUrl = await redis.get(cacheKey);
+      } catch (e) {
+        console.warn('Redis read error:', e.message);
+      }
     }
 
     if (cachedUrl && typeof cachedUrl === 'string') {
@@ -49,28 +58,40 @@ export default async function handler(req, res) {
 
     console.log(`❌ КЭШ ПРОМАХ. Генерация...`);
 
-    // --- ДАЛЕЕ ВАШ ИСХОДНЫЙ КОД ГЕНЕРАЦИИ (без изменений) ---
+    // --- Парсим персонажей (для референсов) ---
     let charactersArray = [];
     if (characters) {
       try {
         charactersArray = JSON.parse(characters);
-      } catch (e) {}
+        console.log(`👥 Персонажи: ${charactersArray.map(c => c.name).join(', ')}`);
+      } catch (e) {
+        console.warn('Failed to parse characters:', e.message);
+      }
     }
 
     const messages = [{ role: "user", content: [{ type: "text", text: prompt }] }];
 
+    // Добавляем референсы
     for (const char of charactersArray) {
       if (!char.url) continue;
       try {
+        console.log(`📥 Скачиваю референс: ${char.name}`);
         const imgRes = await fetch(char.url);
         if (!imgRes.ok) continue;
         const buffer = await imgRes.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
-        messages[0].content.push({ type: "image_url", image_url: { url: `data:${contentType};base64,${base64}` } });
-      } catch (err) {}
+        messages[0].content.push({
+          type: "image_url",
+          image_url: { url: `data:${contentType};base64,${base64}` }
+        });
+        console.log(`✅ Референс ${char.name} добавлен`);
+      } catch (err) {
+        console.warn(`❌ Ошибка при обработке ${char.name}:`, err.message);
+      }
     }
 
+    // Запрос к LinkAPI
     const linkapiRes = await fetch('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
@@ -87,6 +108,7 @@ export default async function handler(req, res) {
     if (!base64Image) throw new Error('LinkAPI не вернул base64');
     base64Image = base64Image.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
 
+    // Загрузка на ImgBB
     const imgbbForm = new FormData();
     imgbbForm.append('key', finalImgbbKey);
     imgbbForm.append('image', base64Image);
@@ -97,15 +119,19 @@ export default async function handler(req, res) {
     if (!imgbbRes.ok || !imgbbData.success) throw new Error(`ImgBB error: ${imgbbData.error?.message}`);
     const imageUrl = imgbbData.data.url;
 
-    console.log(`💾 Сохраняем в кэш: ${cacheKey} -> ${imageUrl}`);
-    try {
-      await redis.set(cacheKey, imageUrl, 'EX', 604800);
-    } catch (e) {
-      console.warn('Redis write error:', e.message);
+    // Сохраняем в кэш
+    if (redis) {
+      try {
+        await redis.set(cacheKey, imageUrl, 'EX', 604800);
+        console.log(`💾 Сохраняем в кэш: ${cacheKey} -> ${imageUrl}`);
+      } catch (e) {
+        console.warn('Redis write error:', e.message);
+      }
     }
 
     return res.redirect(302, imageUrl);
   } catch (error) {
     console.error('❌ Ошибка:', error);
     return res.status(500).send(`Proxy error: ${error.message}`);
-  } }
+  }
+}
