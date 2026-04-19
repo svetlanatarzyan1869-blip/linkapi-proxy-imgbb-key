@@ -1,10 +1,9 @@
-// /api/generate.js – с кэшированием через Redis (ioredis)
+// /api/generate.js – возвращает изображение напрямую (без редиректа)
 
 import Redis from 'ioredis';
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
 
-// Подключаемся к Redis через переменную REDIS_URL
 const redis = new Redis(process.env.REDIS_URL);
 
 function getCacheKey(userId, prompt, characters, style) {
@@ -21,22 +20,17 @@ function getCacheKey(userId, prompt, characters, style) {
 }
 
 async function fetchImageAsBase64(url) {
-  try {
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    const buffer = await response.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-    const contentType = response.headers.get('content-type') || 'image/jpeg';
-    return `data:${contentType};base64,${base64}`;
-  } catch (err) {
-    console.warn(`Ошибка при скачивании изображения: ${err.message}`);
-    return null;
-  }
+  const response = await fetch(url);
+  if (!response.ok) return null;
+  const buffer = await response.arrayBuffer();
+  const base64 = Buffer.from(buffer).toString('base64');
+  const contentType = response.headers.get('content-type') || 'image/jpeg';
+  return { base64, contentType };
 }
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
@@ -46,37 +40,43 @@ export default async function handler(req, res) {
 
   try {
     const {
-      key,
-      prompt,
-      characters,
-      style,
+      key, prompt, characters, style,
       model = 'gemini-3.1-flash-image-preview',
       imgbb_key = DEFAULT_IMGBB_KEY,
       userId
     } = req.query;
 
-    if (!key) return res.status(400).send('Missing required parameter: key');
-    if (!prompt) return res.status(400).send('Missing required parameter: prompt');
-    if (!userId) return res.status(400).send('Missing required parameter: userId');
+    if (!key) return res.status(400).send('Missing key');
+    if (!prompt) return res.status(400).send('Missing prompt');
+    if (!userId) return res.status(400).send('Missing userId');
 
     const cacheKey = getCacheKey(userId, prompt, characters, style);
-    console.log(`🔍 Проверка кэша по ключу: ${cacheKey}`);
-    
+    console.log(`🔍 Проверка кэша: ${cacheKey}`);
+
+    let imageUrl = null;
+
+    // Пытаемся получить URL из Redis
     try {
-      const cachedUrl = await redis.get(cacheKey);
-      if (cachedUrl && typeof cachedUrl === 'string') {
-        console.log(`✅ КЭШ! Возвращаем сохранённое изображение: ${cachedUrl}`);
-        res.setHeader('X-Cache-Status', 'HIT');
-        res.setHeader('X-Time-Taken', `${Date.now() - startTime}ms`);
-        return res.redirect(302, cachedUrl);
-      }
-    } catch (redisErr) {
-      console.warn('Redis error (continuing without cache):', redisErr.message);
+      imageUrl = await redis.get(cacheKey);
+    } catch (e) {
+      console.warn('Redis read error:', e.message);
+    }
+
+    if (imageUrl && typeof imageUrl === 'string') {
+      console.log(`✅ КЭШ! Берём картинку из кэша: ${imageUrl}`);
+      // Скачиваем картинку из ImgBB и отдаём клиенту
+      const imgResponse = await fetch(imageUrl);
+      if (!imgResponse.ok) throw new Error(`Failed to fetch cached image: ${imgResponse.status}`);
+      const imageBuffer = await imgResponse.buffer();
+      res.setHeader('Content-Type', imgResponse.headers.get('content-type') || 'image/jpeg');
+      res.setHeader('X-Cache-Status', 'HIT');
+      res.setHeader('X-Time-Taken', `${Date.now() - startTime}ms`);
+      return res.status(200).send(imageBuffer);
     }
 
     console.log(`❌ КЭШ ПРОМАХ. Генерируем новое изображение...`);
 
-    // --- Подготовка запроса к LinkAPI ---
+    // --- Генерация новой картинки (ваш старый код) ---
     let charactersArray = [];
     if (characters) {
       try {
@@ -91,22 +91,18 @@ export default async function handler(req, res) {
 
     for (const char of charactersArray) {
       if (!char.url) continue;
-      const base64Image = await fetchImageAsBase64(char.url);
-      if (base64Image) {
+      const { base64, contentType } = await fetchImageAsBase64(char.url);
+      if (base64) {
         messages[0].content.push({
           type: "image_url",
-          image_url: { url: base64Image }
+          image_url: { url: `data:${contentType};base64,${base64}` }
         });
       }
     }
 
-    // --- Запрос к LinkAPI ---
     const linkapiRes = await fetch('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${key}`
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify({ model, messages, style })
     });
 
@@ -127,35 +123,32 @@ export default async function handler(req, res) {
     if (!base64Image) throw new Error('LinkAPI не вернул base64');
     base64Image = base64Image.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
 
-    // --- Загрузка на ImgBB ---
+    // Загружаем на ImgBB
     const imgbbForm = new FormData();
     imgbbForm.append('key', imgbb_key);
     imgbbForm.append('image', base64Image);
     imgbbForm.append('name', `generated_${Date.now()}`);
 
-    const imgbbRes = await fetch('https://api.imgbb.com/1/upload', {
-      method: 'POST',
-      body: imgbbForm
-    });
-
+    const imgbbRes = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: imgbbForm });
     const imgbbData = await imgbbRes.json();
-    if (!imgbbRes.ok || !imgbbData.success) {
-      throw new Error(`ImgBB error: ${imgbbData.error?.message}`);
-    }
+    if (!imgbbRes.ok || !imgbbData.success) throw new Error(`ImgBB error: ${imgbbData.error?.message}`);
+    imageUrl = imgbbData.data.url;
 
-    const imageUrl = imgbbData.data.url;
-    console.log(`💾 Сохраняем результат в кэш по ключу: ${cacheKey}`);
-    
+    console.log(`💾 Сохраняем URL в кэш: ${cacheKey}`);
     try {
-      await redis.set(cacheKey, imageUrl, 'EX', 604800); // 7 дней
-    } catch (redisErr) {
-      console.warn('Failed to save to Redis:', redisErr.message);
+      await redis.set(cacheKey, imageUrl, 'EX', 604800);
+    } catch (e) {
+      console.warn('Redis write error:', e.message);
     }
 
+    // Теперь отдаём изображение напрямую
+    const finalImageResponse = await fetch(imageUrl);
+    if (!finalImageResponse.ok) throw new Error('Failed to fetch generated image');
+    const imageBuffer = await finalImageResponse.buffer();
+    res.setHeader('Content-Type', finalImageResponse.headers.get('content-type') || 'image/jpeg');
     res.setHeader('X-Cache-Status', 'MISS');
     res.setHeader('X-Time-Taken', `${Date.now() - startTime}ms`);
-    console.log(`✅ Готово. Редирект на: ${imageUrl}`);
-    return res.redirect(302, imageUrl);
+    return res.status(200).send(imageBuffer);
 
   } catch (error) {
     console.error('❌ Ошибка:', error);
