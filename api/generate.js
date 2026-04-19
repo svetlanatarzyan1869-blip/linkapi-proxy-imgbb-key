@@ -1,10 +1,11 @@
-// /api/generate.js – LinkAPI + ImgBB с кэшированием через Upstash Redis
+// /api/generate.js – с кэшированием через Redis (ioredis)
 
-import { Redis } from '@upstash/redis';
+import Redis from 'ioredis';
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
 
-const redis = Redis.fromEnv();
+// Подключаемся к Redis через переменную REDIS_URL
+const redis = new Redis(process.env.REDIS_URL);
 
 function getCacheKey(userId, prompt, characters, style) {
   let charactersArray = [];
@@ -61,12 +62,16 @@ export default async function handler(req, res) {
     const cacheKey = getCacheKey(userId, prompt, characters, style);
     console.log(`🔍 Проверка кэша по ключу: ${cacheKey}`);
     
-    const cachedUrl = await redis.get(cacheKey);
-    if (cachedUrl && typeof cachedUrl === 'string') {
-      console.log(`✅ КЭШ! Возвращаем сохранённое изображение: ${cachedUrl}`);
-      res.setHeader('X-Cache-Status', 'HIT');
-      res.setHeader('X-Time-Taken', `${Date.now() - startTime}ms`);
-      return res.redirect(302, cachedUrl);
+    try {
+      const cachedUrl = await redis.get(cacheKey);
+      if (cachedUrl && typeof cachedUrl === 'string') {
+        console.log(`✅ КЭШ! Возвращаем сохранённое изображение: ${cachedUrl}`);
+        res.setHeader('X-Cache-Status', 'HIT');
+        res.setHeader('X-Time-Taken', `${Date.now() - startTime}ms`);
+        return res.redirect(302, cachedUrl);
+      }
+    } catch (redisErr) {
+      console.warn('Redis error (continuing without cache):', redisErr.message);
     }
 
     console.log(`❌ КЭШ ПРОМАХ. Генерируем новое изображение...`);
@@ -140,7 +145,12 @@ export default async function handler(req, res) {
 
     const imageUrl = imgbbData.data.url;
     console.log(`💾 Сохраняем результат в кэш по ключу: ${cacheKey}`);
-    await redis.set(cacheKey, imageUrl, { ex: 604800 });
+    
+    try {
+      await redis.set(cacheKey, imageUrl, 'EX', 604800); // 7 дней
+    } catch (redisErr) {
+      console.warn('Failed to save to Redis:', redisErr.message);
+    }
 
     res.setHeader('X-Cache-Status', 'MISS');
     res.setHeader('X-Time-Taken', `${Date.now() - startTime}ms`);
