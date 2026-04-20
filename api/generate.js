@@ -23,18 +23,20 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'GET') return res.status(405).end();
 
-  const start = Date.now();
   try {
-    let { key, prompt, characters, style, model = 'gemini-3.1-flash-image-preview', imgbb_key, userId } = req.query;
+    let { key, prompt, characters, style, model = 'gemini-2.5-flash-image', imgbb_key, userId } = req.query;
     if (!key || !prompt || !userId) return res.status(400).send('Missing key, prompt, or userId');
 
     const finalImgbbKey = imgbb_key || DEFAULT_IMGBB_KEY;
 
-    // --- ПРИНУДИТЕЛЬНЫЙ СТИЛЬ (manga_bw) ---
-    // Временно игнорируем входящий style и используем свой
-    const forcedStyle = "Black and white Japanese manga style. Pure black ink on white paper, no colour. Screentone dots for shading, bold variable-weight ink lines, speed lines, focus lines. Single page with 3-4 panels, white gutters. High contrast, expressive faces. English SFX only.";
+    // Принудительный стиль manga_bw
+    const forcedStyle = "Black and white Japanese manga style. Pure black ink on white paper, no colour. Screentone dots for shading, bold ink lines, speed lines, focus lines. High contrast, expressive faces. English SFX only.";
     console.log(`🎨 FORCED manga_bw style (${forcedStyle.length} chars)`);
-    style = forcedStyle; // заменяем любой входящий стиль
+    style = forcedStyle;
+
+    // --- Объединяем стиль и промпт ---
+    const fullPrompt = `${style}\n\n${prompt}`;
+    const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
 
     const cacheKey = getCacheKey(userId, prompt, characters, style);
     let cachedUrl = null;
@@ -50,7 +52,6 @@ export default async function handler(req, res) {
 
     let chars = [];
     try { chars = JSON.parse(characters || '[]'); } catch(e) {}
-    const messages = [{ role: "user", content: [{ type: "text", text: prompt }] }];
     for (const c of chars) {
       if (!c.url) continue;
       try {
@@ -63,10 +64,11 @@ export default async function handler(req, res) {
       } catch(e) { console.warn(`Failed to fetch ${c.name}:`, e.message); }
     }
 
+    // Отправляем запрос в LinkAPI без отдельного параметра style
     const linkRes = await fetch('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-      body: JSON.stringify({ model, messages, style })
+      body: JSON.stringify({ model, messages })   // style убран
     });
     if (!linkRes.ok) throw new Error(`LinkAPI error ${linkRes.status}`);
     const linkData = await linkRes.json();
