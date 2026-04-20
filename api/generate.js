@@ -1,6 +1,19 @@
 import Redis from 'ioredis';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
+
+// Загружаем словарь стилей (один раз при старте)
+let styleMap = {};
+try {
+  styleMap = require('./data/styles.json');
+  console.log(`✅ Loaded ${Object.keys(styleMap).length} styles`);
+} catch (err) {
+  console.warn('⚠️ styles.json not found, using fallback');
+  // fallback на случай отсутствия файла
+  styleMap = { manga_bw: "Black and white Japanese manga style. Pure black ink on white paper, no colour. Screentone dots for shading, bold ink lines." };
+}
 
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL;
 let redis = null;
@@ -24,21 +37,29 @@ export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).end();
 
   try {
-    let { key, prompt, characters, style, model = 'gemini-2.5-flash-image', imgbb_key, userId } = req.query;
+    let { key, prompt, characters, style, model = 'gemini-3.1-flash-image-preview', imgbb_key, userId } = req.query;
     if (!key || !prompt || !userId) return res.status(400).send('Missing key, prompt, or userId');
 
     const finalImgbbKey = imgbb_key || DEFAULT_IMGBB_KEY;
 
-    // Принудительный стиль manga_bw
-    const forcedStyle = "Black and white Japanese manga style. Pure black ink on white paper, no colour. Screentone dots for shading, bold ink lines, speed lines, focus lines. High contrast, expressive faces. English SFX only.";
-    console.log(`🎨 FORCED manga_bw style (${forcedStyle.length} chars)`);
-    style = forcedStyle;
+    // --- Замена короткого стиля на полный промпт ---
+    let finalStyle = style;
+    if (style && styleMap[style.toLowerCase()]) {
+      finalStyle = styleMap[style.toLowerCase()];
+      console.log(`🎨 Style replaced: "${style}" -> full prompt (${finalStyle.length} chars)`);
+    } else if (style) {
+      console.log(`⚠️ Style "${style}" not found, using as is`);
+    } else {
+      // Если стиль не указан, используем значение по умолчанию (например, manga_bw)
+      finalStyle = styleMap['manga_bw'] || "Black and white manga style";
+      console.log(`🎨 No style specified, using default manga_bw`);
+    }
 
-    // --- Объединяем стиль и промпт ---
-    const fullPrompt = `${style}\n\n${prompt}`;
+    // --- Объединяем стиль и промпт (для надёжности) ---
+    const fullPrompt = `${finalStyle}\n\n${prompt}`;
     const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
 
-    const cacheKey = getCacheKey(userId, prompt, characters, style);
+    const cacheKey = getCacheKey(userId, prompt, characters, finalStyle);
     let cachedUrl = null;
     if (redis) {
       try { cachedUrl = await redis.get(cacheKey); } catch(e) { console.warn(e); }
@@ -64,11 +85,11 @@ export default async function handler(req, res) {
       } catch(e) { console.warn(`Failed to fetch ${c.name}:`, e.message); }
     }
 
-    // Отправляем запрос в LinkAPI без отдельного параметра style
+    // Отправляем запрос в LinkAPI (без отдельного параметра style)
     const linkRes = await fetch('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-      body: JSON.stringify({ model, messages })   // style убран
+      body: JSON.stringify({ model, messages })
     });
     if (!linkRes.ok) throw new Error(`LinkAPI error ${linkRes.status}`);
     const linkData = await linkRes.json();
