@@ -1,4 +1,4 @@
-// /api/generate.js – финальная версия с поддержкой стилей из data/styles.json, Redis и кэшем
+// /api/generate.js – с поддержкой стилей из data/styles.json, Redis и кэшем
 
 import Redis from 'ioredis';
 import fs from 'fs';
@@ -6,7 +6,7 @@ import path from 'path';
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
 
-// --- Загрузка словаря стилей из JSON файла ---
+// --- Загрузка словаря стилей из JSON ---
 let styleMap = {};
 try {
   const stylesPath = path.join(process.cwd(), 'data', 'styles.json');
@@ -32,7 +32,7 @@ if (redisUrl) {
   console.warn('⚠️ Redis URL не задан, кэширование отключено');
 }
 
-// --- Вспомогательная функция для ключа кэша ---
+// --- Ключ кэша (учитываем userId, prompt, characters, style) ---
 function getCacheKey(userId, prompt, characters, style) {
   let charactersArray = [];
   if (characters) {
@@ -46,7 +46,6 @@ function getCacheKey(userId, prompt, characters, style) {
   return `img:${hashedData}`;
 }
 
-// --- Основной обработчик ---
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -61,20 +60,20 @@ export default async function handler(req, res) {
     let { key, prompt, characters, style, model = 'gemini-3.1-flash-image-preview', imgbb_key, userId } = req.query;
     if (!key) return res.status(400).send('Missing required parameter: key');
     if (!prompt) return res.status(400).send('Missing required parameter: prompt');
-    if (!userId) return res.status(400).send('Missing required parameter: userId'); // можно сделать необязательным, если не нужен
+    if (!userId) return res.status(400).send('Missing required parameter: userId');
 
     const finalImgbbKey = imgbb_key || DEFAULT_IMGBB_KEY;
 
-    // --- Замена короткого названия стиля на полный промт ---
+    // --- ЗАМЕНА КОРОТКОГО СТИЛЯ НА ПОЛНЫЙ ПРОМТ ---
     if (style && styleMap[style.toLowerCase()]) {
       const original = style;
       style = styleMap[style.toLowerCase()];
       console.log(`🎨 Замена стиля: "${original}" → полный промт (${style.length} символов)`);
     } else if (style) {
-      console.log(`🎨 Стиль "${style}" не найден в словаре, отправляем как есть`);
+      console.log(`⚠️ Стиль "${style}" не найден в словаре, отправляем как есть`);
     }
 
-    // --- Кэш: проверяем, есть ли уже URL ---
+    // --- КЭШ ---
     const cacheKey = getCacheKey(userId, prompt, characters, style);
     let cachedUrl = null;
     if (redis) {
@@ -105,13 +104,9 @@ export default async function handler(req, res) {
       }
     }
 
-    // --- Формируем запрос к LinkAPI ---
-    const messages = [{
-      role: "user",
-      content: [{ type: "text", text: prompt }]
-    }];
+    const messages = [{ role: "user", content: [{ type: "text", text: prompt }] }];
 
-    // Скачиваем референсы и конвертируем в base64
+    // Загружаем референсы
     for (const char of charactersArray) {
       if (!char.url) continue;
       try {
@@ -138,11 +133,7 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${key}`
       },
-      body: JSON.stringify({
-        model: model,
-        messages: messages,
-        style: style
-      })
+      body: JSON.stringify({ model, messages, style })
     });
 
     if (!linkapiRes.ok) {
@@ -151,8 +142,6 @@ export default async function handler(req, res) {
     }
 
     const linkapiData = await linkapiRes.json();
-
-    // Извлекаем base64
     let base64Image = linkapiData.data?.b64_json ||
                       linkapiData.b64_json ||
                       linkapiData.image;
@@ -164,7 +153,6 @@ export default async function handler(req, res) {
     }
 
     if (!base64Image) throw new Error('LinkAPI не вернул base64');
-
     base64Image = base64Image.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
 
     // --- Загрузка на ImgBB ---
@@ -186,7 +174,6 @@ export default async function handler(req, res) {
     const imageUrl = imgbbData.data.url;
     console.log(`💾 Сохраняем в кэш: ${cacheKey} -> ${imageUrl}`);
 
-    // --- Сохраняем URL в Redis на 7 дней ---
     if (redis) {
       try {
         await redis.set(cacheKey, imageUrl, 'EX', 604800);
@@ -203,4 +190,5 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error('❌ Ошибка:', error);
     return res.status(500).send(`Proxy error: ${error.message}`);
-  } }
+  }
+}
