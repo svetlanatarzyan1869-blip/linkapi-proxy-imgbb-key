@@ -1,9 +1,8 @@
 {
   "name": "linkapi-proxy-imgbb-key",
   "version": "1.0.0",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
-    "@upstash/redis": "^1.37.0",
-    "ioredis": "^5.10.1"
+    "ioredis": "^5.4.1"
   }
 }
