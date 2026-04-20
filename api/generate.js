@@ -1,21 +1,6 @@
 import Redis from 'ioredis';
-import fs from 'fs';
-import path from 'path';
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
-
-let styleMap = {};
-try {
-  const stylesPath = path.join(process.cwd(), 'data', 'styles.json');
-  if (fs.existsSync(stylesPath)) {
-    styleMap = JSON.parse(fs.readFileSync(stylesPath, 'utf-8'));
-    console.log(`✅ Loaded ${Object.keys(styleMap).length} styles`);
-  } else {
-    console.warn('⚠️ styles.json not found');
-  }
-} catch (err) {
-  console.warn('❌ Style load error:', err.message);
-}
 
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL;
 let redis = null;
@@ -45,14 +30,11 @@ export default async function handler(req, res) {
 
     const finalImgbbKey = imgbb_key || DEFAULT_IMGBB_KEY;
 
-    // --- ЗАМЕНА СТИЛЯ ---
-    if (style && styleMap[style.toLowerCase()]) {
-      const original = style;
-      style = styleMap[style.toLowerCase()];
-      console.log(`🎨 Style replaced: "${original}" -> full prompt (${style.length} chars)`);
-    } else if (style) {
-      console.log(`⚠️ Style "${style}" not found in dictionary`);
-    }
+    // --- ПРИНУДИТЕЛЬНЫЙ СТИЛЬ (manga_bw) ---
+    // Временно игнорируем входящий style и используем свой
+    const forcedStyle = "Black and white Japanese manga style. Pure black ink on white paper, no colour. Screentone dots for shading, bold variable-weight ink lines, speed lines, focus lines. Single page with 3-4 panels, white gutters. High contrast, expressive faces. English SFX only.";
+    console.log(`🎨 FORCED manga_bw style (${forcedStyle.length} chars)`);
+    style = forcedStyle; // заменяем любой входящий стиль
 
     const cacheKey = getCacheKey(userId, prompt, characters, style);
     let cachedUrl = null;
