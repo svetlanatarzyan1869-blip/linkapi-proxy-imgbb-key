@@ -4,15 +4,19 @@ const require = createRequire(import.meta.url);
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
 
-// Загружаем стили из data/styles.json
+// Загружаем стили из api/styles.json
 let styleMap = {};
 try {
-  styleMap = require('./data/styles.json');
-  console.log(`✅ Loaded ${Object.keys(styleMap).length} styles from data/styles.json`);
+  styleMap = require('./styles.json');
+  console.log(`✅ Loaded ${Object.keys(styleMap).length} styles from api/styles.json`);
 } catch (err) {
   console.error('❌ Failed to load styles.json:', err.message);
-  // Фолбэк, чтобы код не падал
-  styleMap = { serov: "Valentin Serov Russian Impressionist portrait oil painting style." };
+  // Fallback (минимальный)
+  styleMap = {
+    serov: "Valentin Serov Russian Impressionist portrait oil painting style. Loose, fresh, confident brushwork. Soft diffused natural window light. Psychologically present face. Warm ivory skin tones with cool-grey shadow.",
+    monet: "Claude Monet French Impressionism oil painting style. No hard outlines, broken comma-dab brushstrokes of pure pigment, coloured shadows in violet and blue, luminous natural light, vibrant pure palette.",
+    manga_bw: "Black and white Japanese manga style. Pure black ink on white paper, no colour. Screentone dots for shading, bold variable-weight ink lines, speed lines, focus lines. High contrast, expressive faces."
+  };
 }
 
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL;
@@ -44,24 +48,25 @@ export default async function handler(req, res) {
 
     const finalImgbbKey = imgbb_key || DEFAULT_IMGBB_KEY;
 
-    // Определяем финальный стиль
-    let finalStyle;
+    // Замена стиля
+    let finalStyle = style;
     if (style && styleMap[style.toLowerCase()]) {
       finalStyle = styleMap[style.toLowerCase()];
       console.log(`🎨 Style replaced: "${style}" -> full prompt (${finalStyle.length} chars)`);
     } else if (style) {
-      finalStyle = style;
-      console.log(`⚠️ Style key "${style}" not found, using as is`);
+      console.log(`⚠️ Style "${style}" not found, using as is`);
     } else {
       finalStyle = styleMap.serov;
-      console.log(`🎨 No style specified, using default: serov`);
+      console.log(`🎨 No style, using default serov`);
     }
 
-    // Кэш
+    const fullPrompt = `${finalStyle}\n\n${prompt}`;
+    const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
+
     const cacheKey = getCacheKey(userId, prompt, characters, finalStyle);
     let cachedUrl = null;
     if (redis) {
-      try { cachedUrl = await redis.get(cacheKey); } catch(e) { console.warn('Redis read error:', e.message); }
+      try { cachedUrl = await redis.get(cacheKey); } catch(e) { console.warn(e); }
     }
     if (cachedUrl && typeof cachedUrl === 'string') {
       console.log(`✅ Cache HIT -> ${cachedUrl}`);
@@ -70,13 +75,8 @@ export default async function handler(req, res) {
 
     console.log(`❌ Cache MISS. Generating...`);
 
-    // Парсим персонажей
     let chars = [];
     try { chars = JSON.parse(characters || '[]'); } catch(e) {}
-    // Объединяем стиль и промпт
-    const fullPrompt = `${finalStyle}\n\n${prompt}`;
-    const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
-
     for (const c of chars) {
       if (!c.url) continue;
       try {
@@ -89,7 +89,6 @@ export default async function handler(req, res) {
       } catch(e) { console.warn(`Failed to fetch ${c.name}:`, e.message); }
     }
 
-    // Запрос к LinkAPI (без отдельного style)
     const linkRes = await fetch('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
@@ -108,7 +107,6 @@ export default async function handler(req, res) {
     if (!b64) throw new Error('No image from LinkAPI');
     b64 = b64.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
 
-    // Загрузка на ImgBB
     const form = new FormData();
     form.append('key', finalImgbbKey);
     form.append('image', b64);
@@ -118,9 +116,8 @@ export default async function handler(req, res) {
     if (!imgRes.ok || !imgData.success) throw new Error(`ImgBB error: ${imgData.error?.message}`);
     const url = imgData.data.url;
 
-    // Сохраняем в кэш
     if (redis) {
-      try { await redis.set(cacheKey, url, 'EX', 604800); } catch(e) { console.warn('Redis write error:', e.message); }
+      try { await redis.set(cacheKey, url, 'EX', 604800); } catch(e) { console.warn(e); }
     }
 
     console.log(`✅ Redirect to ${url}`);
