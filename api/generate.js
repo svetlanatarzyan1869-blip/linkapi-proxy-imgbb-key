@@ -4,15 +4,15 @@ const require = createRequire(import.meta.url);
 
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
 
-// Загружаем словарь стилей (один раз при старте)
+// Загружаем стили из data/styles.json
 let styleMap = {};
 try {
   styleMap = require('./data/styles.json');
-  console.log(`✅ Loaded ${Object.keys(styleMap).length} styles`);
+  console.log(`✅ Loaded ${Object.keys(styleMap).length} styles from data/styles.json`);
 } catch (err) {
-  console.warn('⚠️ styles.json not found, using fallback');
-  // fallback на случай отсутствия файла
-  styleMap = { manga_bw: "Black and white Japanese manga style. Pure black ink on white paper, no colour. Screentone dots for shading, bold ink lines." };
+  console.error('❌ Failed to load styles.json:', err.message);
+  // Фолбэк, чтобы код не падал
+  styleMap = { serov: "Valentin Serov Russian Impressionist portrait oil painting style." };
 }
 
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL;
@@ -38,31 +38,30 @@ export default async function handler(req, res) {
 
   try {
     let { key, prompt, characters, style, model = 'gemini-3.1-flash-image-preview', imgbb_key, userId } = req.query;
-    if (!key || !prompt || !userId) return res.status(400).send('Missing key, prompt, or userId');
+    if (!key || !prompt || !userId) {
+      return res.status(400).send('Missing key, prompt, or userId');
+    }
 
     const finalImgbbKey = imgbb_key || DEFAULT_IMGBB_KEY;
 
-    // --- Замена короткого стиля на полный промпт ---
-    let finalStyle = style;
+    // Определяем финальный стиль
+    let finalStyle;
     if (style && styleMap[style.toLowerCase()]) {
       finalStyle = styleMap[style.toLowerCase()];
       console.log(`🎨 Style replaced: "${style}" -> full prompt (${finalStyle.length} chars)`);
     } else if (style) {
-      console.log(`⚠️ Style "${style}" not found, using as is`);
+      finalStyle = style;
+      console.log(`⚠️ Style key "${style}" not found, using as is`);
     } else {
-      // Если стиль не указан, используем значение по умолчанию (например, manga_bw)
-      finalStyle = styleMap['manga_bw'] || "Black and white manga style";
-      console.log(`🎨 No style specified, using default manga_bw`);
+      finalStyle = styleMap.serov;
+      console.log(`🎨 No style specified, using default: serov`);
     }
 
-    // --- Объединяем стиль и промпт (для надёжности) ---
-    const fullPrompt = `${finalStyle}\n\n${prompt}`;
-    const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
-
+    // Кэш
     const cacheKey = getCacheKey(userId, prompt, characters, finalStyle);
     let cachedUrl = null;
     if (redis) {
-      try { cachedUrl = await redis.get(cacheKey); } catch(e) { console.warn(e); }
+      try { cachedUrl = await redis.get(cacheKey); } catch(e) { console.warn('Redis read error:', e.message); }
     }
     if (cachedUrl && typeof cachedUrl === 'string') {
       console.log(`✅ Cache HIT -> ${cachedUrl}`);
@@ -71,8 +70,13 @@ export default async function handler(req, res) {
 
     console.log(`❌ Cache MISS. Generating...`);
 
+    // Парсим персонажей
     let chars = [];
     try { chars = JSON.parse(characters || '[]'); } catch(e) {}
+    // Объединяем стиль и промпт
+    const fullPrompt = `${finalStyle}\n\n${prompt}`;
+    const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
+
     for (const c of chars) {
       if (!c.url) continue;
       try {
@@ -85,13 +89,16 @@ export default async function handler(req, res) {
       } catch(e) { console.warn(`Failed to fetch ${c.name}:`, e.message); }
     }
 
-    // Отправляем запрос в LinkAPI (без отдельного параметра style)
+    // Запрос к LinkAPI (без отдельного style)
     const linkRes = await fetch('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify({ model, messages })
     });
-    if (!linkRes.ok) throw new Error(`LinkAPI error ${linkRes.status}`);
+    if (!linkRes.ok) {
+      const errorText = await linkRes.text();
+      throw new Error(`LinkAPI error ${linkRes.status}: ${errorText}`);
+    }
     const linkData = await linkRes.json();
     let b64 = linkData.data?.b64_json || linkData.b64_json || linkData.image;
     if (!b64 && linkData.choices?.[0]?.message?.content) {
@@ -101,6 +108,7 @@ export default async function handler(req, res) {
     if (!b64) throw new Error('No image from LinkAPI');
     b64 = b64.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
 
+    // Загрузка на ImgBB
     const form = new FormData();
     form.append('key', finalImgbbKey);
     form.append('image', b64);
@@ -110,14 +118,15 @@ export default async function handler(req, res) {
     if (!imgRes.ok || !imgData.success) throw new Error(`ImgBB error: ${imgData.error?.message}`);
     const url = imgData.data.url;
 
+    // Сохраняем в кэш
     if (redis) {
-      try { await redis.set(cacheKey, url, 'EX', 604800); } catch(e) { console.warn(e); }
+      try { await redis.set(cacheKey, url, 'EX', 604800); } catch(e) { console.warn('Redis write error:', e.message); }
     }
 
     console.log(`✅ Redirect to ${url}`);
     return res.redirect(302, url);
   } catch (err) {
-    console.error(err);
-    return res.status(500).send(`Error: ${err.message}`);
+    console.error('❌ Fatal error:', err);
+    return res.status(500).send(`Proxy error: ${err.message}`);
   }
 }
