@@ -5,12 +5,27 @@ import crypto from 'crypto';
 
 const require = createRequire(import.meta.url);
 
-// ---------- Расшифровка ----------
+// ---------- Расшифровка с нормализацией base64 ----------
 function decryptData(encryptedBase64, secretKeyBase64) {
   try {
-    const [ivBase64, encryptedBase64Data] = encryptedBase64.split(':');
+    // Нормализация: пробелы -> +, - -> +, _ -> / (для URL-safe base64)
+    let normalized = encryptedBase64.replace(/ /g, '+').replace(/-/g, '+').replace(/_/g, '/');
+    const parts = normalized.split(':');
+    if (parts.length !== 2) {
+      console.error('Invalid format: expected iv:encrypted, got', parts.length);
+      return null;
+    }
+    const [ivBase64, encryptedBase64Data] = parts;
+    console.log(`IV length (base64): ${ivBase64.length}, Encrypted length (base64): ${encryptedBase64Data.length}`);
+    
     const iv = Buffer.from(ivBase64, 'base64');
     const encrypted = Buffer.from(encryptedBase64Data, 'base64');
+    console.log(`IV bytes: ${iv.length}, Encrypted bytes: ${encrypted.length}`);
+    if (encrypted.length % 16 !== 0) {
+      console.error(`Encrypted data length ${encrypted.length} is not multiple of 16`);
+      return null;
+    }
+    
     const key = Buffer.from(secretKeyBase64, 'base64');
     const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
     let decrypted = decipher.update(encrypted);
@@ -56,7 +71,15 @@ export default async function handler(req, res) {
 
   try {
     console.log('🚀 [2/9] Начало запроса');
+    
+    // Проверка наличия ключа расшифровки
     const encryptionKey = process.env.ENCRYPTION_KEY;
+    if (!encryptionKey) {
+      console.error('❌ ENCRYPTION_KEY not set in environment');
+    } else {
+      console.log(`🔑 ENCRYPTION_KEY: ${encryptionKey.substring(0,5)}... (${encryptionKey.length} chars)`);
+    }
+    
     let key, prompt, charactersRaw, imgbb_key;
 
     // ---- Получение параметров: либо из data (зашифрованные), либо из query (устаревший режим) ----
@@ -85,7 +108,6 @@ export default async function handler(req, res) {
     const style = req.query.style;
     const model = req.query.model || 'gemini-3.1-flash-image-preview';
 
-    // Проверка обязательных параметров
     if (!key || !prompt || !userId) {
       console.error('❌ [3/9] Отсутствуют key, prompt или userId');
       return res.status(400).send('Missing key, prompt, or userId');
