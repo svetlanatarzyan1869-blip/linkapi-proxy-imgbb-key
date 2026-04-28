@@ -1,10 +1,30 @@
+// api/generate.js
 import Redis from 'ioredis';
 import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
+import crypto from 'crypto';
 
+const require = createRequire(import.meta.url);
 const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
 
-// 1/9 Загрузка стилей
+// ---------- Расшифровка ----------
+function decryptData(encryptedBase64, secretKeyBase64) {
+  try {
+    // Формат: iv:encrypted (оба в base64)
+    const [ivBase64, encryptedBase64Data] = encryptedBase64.split(':');
+    const iv = Buffer.from(ivBase64, 'base64');
+    const encrypted = Buffer.from(encryptedBase64Data, 'base64');
+    const key = Buffer.from(secretKeyBase64, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    let decrypted = decipher.update(encrypted);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return JSON.parse(decrypted.toString('utf8'));
+  } catch (err) {
+    console.error('Decryption failed:', err.message);
+    return null;
+  }
+}
+
+// ---------- Загрузка стилей ----------
 let styleMap = {};
 try {
   styleMap = require('./styles.json');
@@ -18,7 +38,7 @@ try {
   };
 }
 
-// Redis
+// ---------- Redis ----------
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL;
 let redis = null;
 if (redisUrl) {
@@ -43,14 +63,34 @@ export default async function handler(req, res) {
   try {
     console.log('🚀 [2/9] Начало запроса');
 
-    // Читаем параметры (сначала из заголовков от middleware, потом из query как fallback)
-    const key = req.headers['x-key'] || req.query.key;
-    const prompt = req.headers['x-prompt'] || req.query.prompt;
-    const charactersRaw = req.headers['x-characters'] || req.query.characters;
+    // ---- Чтение параметров: data (шифрованные), userId, style, model ----
+    const encryptionKey = process.env.ENCRYPTION_KEY;
+    let key, prompt, charactersRaw, imgbb_key;
+
+    if (req.query.data && encryptionKey) {
+      const decrypted = decryptData(req.query.data, encryptionKey);
+      if (decrypted && typeof decrypted === 'object') {
+        key = decrypted.key;
+        prompt = decrypted.prompt;
+        charactersRaw = decrypted.characters;
+        imgbb_key = decrypted.imgbb_key;
+        console.log('✅ [3/9] Данные расшифрованы');
+      } else {
+        console.error('❌ [3/9] Ошибка расшифровки');
+        return res.status(400).send('Invalid encrypted data');
+      }
+    } else {
+      // fallback для старых версий (без шифрования) – не рекомендуется
+      key = req.query.key;
+      prompt = req.query.prompt;
+      charactersRaw = req.query.characters;
+      imgbb_key = req.query.imgbb_key;
+      console.log('⚠️ [3/9] Используется незашифрованный запрос (устаревший)');
+    }
+
+    const userId = req.query.userId;
     const style = req.query.style;
     const model = req.query.model || 'gemini-3.1-flash-image-preview';
-    const imgbb_key = req.headers['x-imgbb_key'] || req.query.imgbb_key;
-    const userId = req.query.userId; // видимый в URL
 
     if (!key || !prompt || !userId) {
       console.error('❌ [3/9] Отсутствуют key, prompt или userId');
@@ -66,7 +106,7 @@ export default async function handler(req, res) {
       finalStyle = styleMap[style.toLowerCase()];
       console.log(`🎨 [4/9] Стиль "${style}" заменён`);
     } else if (style) {
-      console.log(`⚠️ [4/9] Стиль "${style}" не найден, используется как есть`);
+      console.log(`⚠️ [4/9] Стиль "${style}" не найден`);
     } else {
       finalStyle = styleMap.serov;
       console.log(`🎨 [4/9] Стиль по умолчанию (Serov)`);
@@ -75,21 +115,21 @@ export default async function handler(req, res) {
     const fullPrompt = `${finalStyle}\n\n${prompt}`;
     const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
 
-    // Кеш
+    // Кэш
     const cacheKey = getCacheKey(userId, prompt, charactersRaw, finalStyle);
     let cachedUrl = null;
     if (redis) {
-      console.log('🔄 [5/9] Проверка кеша...');
+      console.log('🔄 [5/9] Проверка кэша...');
       try { cachedUrl = await redis.get(cacheKey); } catch(e) { console.warn('Redis error:', e.message); }
     } else {
-      console.log('⚠️ [5/9] Redis не настроен, кеш отключён');
+      console.log('⚠️ [5/9] Redis не настроен, кэш отключён');
     }
 
     if (cachedUrl && typeof cachedUrl === 'string') {
-      console.log(`✅ [5/9] Кеш попадание (ссылка скрыта)`);
+      console.log(`✅ [5/9] Кэш попадание (ссылка скрыта)`);
       return res.redirect(302, cachedUrl);
     }
-    console.log('❌ [5/9] Кеш промах, генерация');
+    console.log('❌ [5/9] Кэш промах, генерация');
 
     // Референсы
     let chars = [];
@@ -146,15 +186,15 @@ export default async function handler(req, res) {
     const imageUrl = imgData.data.url;
     console.log(`✅ [8/9] Изображение готово (ссылка скрыта)`);
 
-    // Кешируем
+    // Сохраняем в кэш
     if (redis) {
       try {
         await redis.set(cacheKey, imageUrl, 'EX', 604800);
-        console.log(`💾 [9/9] Сохранено в кеш`);
+        console.log(`💾 [9/9] Сохранено в кэш`);
       } catch(e) { console.warn('Redis set error:', e.message); }
     }
 
-    // Редирект (ссылка не выводится в консоль)
+    // Редирект (ссылка не показывается в логах)
     return res.redirect(302, imageUrl);
   } catch (err) {
     console.error('❌ Ошибка:', err.message);
