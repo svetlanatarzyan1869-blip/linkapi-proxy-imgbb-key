@@ -2,6 +2,7 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Шифратор ключей для Tavo Proxy</title>
     <style>
         body { font-family: system-ui; max-width: 600px; margin: 2rem auto; padding: 1rem; background: #f5f5f7; }
@@ -16,16 +17,13 @@
 <body>
 <div class="container">
     <h1>🔐 Шифратор API-ключей</h1>
-    <p>Введите только <strong>API_KEY и IMGBB_KEY</strong>. Персонажи и промпт остаются открытыми.</p>
+    <p>Введите свои <strong>API_KEY и IMGBB_KEY</strong>. Мастер-ключ уже встроен.</p>
 
     <label>🔑 API_KEY (LinkAPI)</label>
     <input type="text" id="apiKey" placeholder="sk-...">
 
     <label>🖼️ IMGBB_KEY (обязательно)</label>
     <input type="text" id="imgbbKey" placeholder="ваш_ключ_ImgBB">
-
-    <label>🔐 Мастер-ключ (выдан администратором)</label>
-    <input type="password" id="masterKey" placeholder="....">
 
     <button id="encryptBtn">Зашифровать → получить data</button>
 
@@ -38,6 +36,9 @@
 </div>
 
 <script>
+    // Мастер-ключ (ENCRYPTION_KEY из Vercel)
+    const MASTER_KEY = 'DNuPiIbKpNyB8M/h9wZX3I9XqMF0BMORS63wd8RvWKs=';
+
     async function encryptData(obj, secretKeyBase64) {
         const encoder = new TextEncoder();
         const data = encoder.encode(JSON.stringify(obj));
@@ -53,20 +54,19 @@
     document.getElementById('encryptBtn').addEventListener('click', async () => {
         const apiKey = document.getElementById('apiKey').value.trim();
         const imgbbKey = document.getElementById('imgbbKey').value.trim();
-        const masterKey = document.getElementById('masterKey').value.trim();
         const errorDiv = document.getElementById('error');
         const resultDiv = document.getElementById('result');
 
         errorDiv.innerText = '';
         resultDiv.style.display = 'none';
 
-        if (!apiKey || !imgbbKey || !masterKey) {
-            errorDiv.innerText = 'Заполните все поля.';
+        if (!apiKey || !imgbbKey) {
+            errorDiv.innerText = 'Заполните оба поля.';
             return;
         }
 
         try {
-            const encrypted = await encryptData({ key: apiKey, imgbb_key: imgbbKey }, masterKey);
+            const encrypted = await encryptData({ key: apiKey, imgbb_key: imgbbKey }, MASTER_KEY);
             document.getElementById('encryptedData').innerText = encrypted;
             resultDiv.style.display = 'block';
         } catch (err) {
