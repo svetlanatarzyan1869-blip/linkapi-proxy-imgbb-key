@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Шифратор данных для Tavo Proxy</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 1rem; background: #f5f5f7; }
+        .container { background: white; border-radius: 1rem; padding: 2rem; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        label { display: block; margin-top: 1rem; font-weight: 600; }
+        input, textarea { width: 100%; padding: 0.5rem; margin-top: 0.25rem; border: 1px solid #ccc; border-radius: 0.5rem; font-family: monospace; }
+        button { margin-top: 1.5rem; padding: 0.75rem 1.5rem; background: #0070f3; color: white; border: none; border-radius: 0.5rem; cursor: pointer; font-size: 1rem; }
+        .result { margin-top: 1.5rem; background: #f0f0f0; padding: 1rem; border-radius: 0.5rem; word-break: break-all; }
+        .error { color: red; margin-top: 0.5rem; }
+        hr { margin: 1.5rem 0; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🔐 Шифратор данных для прокси Tavo</h1>
+    <p>Введите свои данные. Они <strong>не покинут ваш браузер</strong> и будут зашифрованы локально.</p>
+
+    <label>🔑 API_KEY (LinkAPI)</label>
+    <input type="text" id="apiKey" placeholder="sk-...">
+
+    <label>🖼️ IMGBB_KEY (обязательно, ваш личный ключ)</label>
+    <input type="text" id="imgbbKey" placeholder="ваш_ключ_ImgBB">
+
+    <label>👥 JSON персонажей (пример: [{"name":"Vova","url":"https://..."}])</label>
+    <textarea id="characters" rows="3" placeholder='[{"name":"Vova","url":"https://i.ibb.co/..."}]'></textarea>
+
+    <label>🔐 Мастер-ключ шифрования (выдан администратором)</label>
+    <input type="password" id="masterKey" placeholder="Вставьте ключ">
+
+    <button id="encryptBtn">Зашифровать → получить data</button>
+
+    <div id="result" class="result" style="display:none;">
+        <strong>Ваша строка <code>data</code> (скопируйте её):</strong><br>
+        <span id="encryptedData" style="word-break:break-all;"></span>
+        <button id="copyBtn" style="margin-top:0.5rem; background:#28a745;">Копировать</button>
+    </div>
+    <div id="error" class="error"></div>
+
+    <hr>
+    <p><strong>Инструкция:</strong> после получения строки <code>data</code> замените в вашем промте (пункт 6) все параметры <code>key=...&characters=...&imgbb_key=...</code> на один параметр <code>data=...</code> (с полученным значением). Остальные параметры (<code>userId</code>, <code>style</code>, <code>model</code>, <code>prompt</code>) остаются.</p>
+</div>
+
+<script>
+    const encryptBtn = document.getElementById('encryptBtn');
+    const resultDiv = document.getElementById('result');
+    const errorDiv = document.getElementById('error');
+    const encryptedSpan = document.getElementById('encryptedData');
+    const copyBtn = document.getElementById('copyBtn');
+
+    async function encryptData(obj, secretKeyBase64) {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(JSON.stringify(obj));
+        const iv = crypto.getRandomValues(new Uint8Array(16));
+        const keyBuffer = Uint8Array.from(atob(secretKeyBase64), c => c.charCodeAt(0));
+        const cryptoKey = await crypto.subtle.importKey('raw', keyBuffer, 'AES-CBC', false, ['encrypt']);
+        const encrypted = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, cryptoKey, data);
+        const ivBase64 = btoa(String.fromCharCode(...iv));
+        const encryptedBase64 = btoa(String.fromCharCode(...new Uint8Array(encrypted)));
+        return `${ivBase64}:${encryptedBase64}`;
+    }
+
+    encryptBtn.addEventListener('click', async () => {
+        errorDiv.innerText = '';
+        resultDiv.style.display = 'none';
+        
+        const apiKey = document.getElementById('apiKey').value.trim();
+        const imgbbKey = document.getElementById('imgbbKey').value.trim();
+        const charactersRaw = document.getElementById('characters').value.trim();
+        const masterKey = document.getElementById('masterKey').value.trim();
+
+        if (!apiKey) {
+            errorDiv.innerText = 'Ошибка: API_KEY обязателен.';
+            return;
+        }
+        if (!imgbbKey) {
+            errorDiv.innerText = 'Ошибка: IMGBB_KEY обязателен (введите свой ключ ImgBB).';
+            return;
+        }
+        if (!masterKey) {
+            errorDiv.innerText = 'Ошибка: введите мастер-ключ, выданный администратором.';
+            return;
+        }
+        let charactersJson;
+        try {
+            charactersJson = JSON.parse(charactersRaw);
+            if (!Array.isArray(charactersJson)) throw new Error();
+        } catch(e) {
+            errorDiv.innerText = 'Ошибка: characters должен быть валидным JSON-массивом. Пример: [{"name":"Vova","url":"https://..."}]';
+            return;
+        }
+
+        const sensitive = {
+            key: apiKey,
+            characters: charactersRaw,
+            imgbb_key: imgbbKey
+        };
+
+        try {
+            const encrypted = await encryptData(sensitive, masterKey);
+            encryptedSpan.innerText = encrypted;
+            resultDiv.style.display = 'block';
+        } catch(err) {
+            errorDiv.innerText = 'Ошибка шифрования: ' + err.message;
+        }
+    });
+
+    copyBtn.addEventListener('click', () => {
+        const textToCopy = encryptedSpan.innerText;
+        navigator.clipboard.writeText(textToCopy).then(() => {
+            alert('Скопировано в буфер обмена!');
+        }).catch(() => {
+            alert('Не удалось скопировать, скопируйте вручную.');
+        });
+    });
+</script>
+</body>
+</html>
