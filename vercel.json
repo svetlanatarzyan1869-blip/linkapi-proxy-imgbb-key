@@ -3,5 +3,6 @@
     "api/generate.js": {
       "maxDuration": 60
     }
-  }
+  },
+  "public": true
 }
