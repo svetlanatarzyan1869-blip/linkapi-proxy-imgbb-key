@@ -4,12 +4,10 @@ import { createRequire } from 'module';
 import crypto from 'crypto';
 
 const require = createRequire(import.meta.url);
-const DEFAULT_IMGBB_KEY = '9b18b658da2d84f03f07d19da36eb17d';
 
 // ---------- Расшифровка ----------
 function decryptData(encryptedBase64, secretKeyBase64) {
   try {
-    // Формат: iv:encrypted (оба в base64)
     const [ivBase64, encryptedBase64Data] = encryptedBase64.split(':');
     const iv = Buffer.from(ivBase64, 'base64');
     const encrypted = Buffer.from(encryptedBase64Data, 'base64');
@@ -24,21 +22,17 @@ function decryptData(encryptedBase64, secretKeyBase64) {
   }
 }
 
-// ---------- Загрузка стилей ----------
+// ---------- Загрузка стилей из styles.json ----------
 let styleMap = {};
 try {
   styleMap = require('./styles.json');
   console.log(`✅ [1/9] Загружено стилей: ${Object.keys(styleMap).length}`);
 } catch (err) {
-  console.error('❌ [1/9] Ошибка styles.json:', err.message);
-  styleMap = {
-    serov: "Valentin Serov Russian Impressionist portrait oil painting style. Loose, fresh, confident brushwork. Soft diffused natural window light. Psychologically present face. Warm ivory skin tones with cool-grey shadow.",
-    monet: "Claude Monet French Impressionism oil painting style. No hard outlines, broken comma-dab brushstrokes of pure pigment, coloured shadows in violet and blue, luminous natural light, vibrant pure palette.",
-    manga_bw: "Black and white Japanese manga style. Pure black ink on white paper, no colour. Screentone dots for shading, bold variable-weight ink lines, speed lines, focus lines. High contrast, expressive faces."
-  };
+  console.error('❌ [1/9] Ошибка загрузки styles.json:', err.message);
+  throw new Error('styles.json not found or invalid');
 }
 
-// ---------- Redis ----------
+// ---------- Redis (опционально) ----------
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL;
 let redis = null;
 if (redisUrl) {
@@ -62,11 +56,10 @@ export default async function handler(req, res) {
 
   try {
     console.log('🚀 [2/9] Начало запроса');
-
-    // ---- Чтение параметров: data (шифрованные), userId, style, model ----
     const encryptionKey = process.env.ENCRYPTION_KEY;
     let key, prompt, charactersRaw, imgbb_key;
 
+    // ---- Получение параметров: либо из data (зашифрованные), либо из query (устаревший режим) ----
     if (req.query.data && encryptionKey) {
       const decrypted = decryptData(req.query.data, encryptionKey);
       if (decrypted && typeof decrypted === 'object') {
@@ -92,30 +85,38 @@ export default async function handler(req, res) {
     const style = req.query.style;
     const model = req.query.model || 'gemini-3.1-flash-image-preview';
 
+    // Проверка обязательных параметров
     if (!key || !prompt || !userId) {
       console.error('❌ [3/9] Отсутствуют key, prompt или userId');
       return res.status(400).send('Missing key, prompt, or userId');
     }
+    if (!imgbb_key) {
+      console.error('❌ [3/9] Отсутствует imgbb_key');
+      return res.status(400).send('Missing imgbb_key');
+    }
+
     console.log(`✅ [3/9] Параметры получены (userId: ${userId})`);
 
-    const finalImgbbKey = imgbb_key || DEFAULT_IMGBB_KEY;
-
-    // Стиль
+    // ---- Обработка стиля: если нет или не найден → kodak_portra_400 ----
     let finalStyle = style;
     if (style && styleMap[style.toLowerCase()]) {
       finalStyle = styleMap[style.toLowerCase()];
       console.log(`🎨 [4/9] Стиль "${style}" заменён`);
-    } else if (style) {
-      console.log(`⚠️ [4/9] Стиль "${style}" не найден`);
     } else {
-      finalStyle = styleMap.serov;
-      console.log(`🎨 [4/9] Стиль по умолчанию (Serov)`);
+      const defaultStyleName = 'kodak_portra_400';
+      if (styleMap[defaultStyleName]) {
+        finalStyle = styleMap[defaultStyleName];
+        console.log(`🎨 [4/9] Стиль не указан или не найден, использован ${defaultStyleName}`);
+      } else {
+        console.error(`❌ [4/9] Стиль по умолчанию ${defaultStyleName} не найден в styles.json`);
+        return res.status(500).send('Default style missing');
+      }
     }
 
     const fullPrompt = `${finalStyle}\n\n${prompt}`;
     const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
 
-    // Кэш
+    // ---- Кэш ----
     const cacheKey = getCacheKey(userId, prompt, charactersRaw, finalStyle);
     let cachedUrl = null;
     if (redis) {
@@ -131,7 +132,7 @@ export default async function handler(req, res) {
     }
     console.log('❌ [5/9] Кэш промах, генерация');
 
-    // Референсы
+    // ---- Референсы персонажей ----
     let chars = [];
     try { chars = JSON.parse(charactersRaw || '[]'); } catch(e) { console.warn('Ошибка парсинга characters'); }
     console.log(`📸 [6/9] Референсов: ${chars.length}`);
@@ -150,7 +151,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // LinkAPI
+    // ---- LinkAPI ----
     console.log('🤖 [7/9] Запрос в LinkAPI...');
     const linkRes = await fetch('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
@@ -172,10 +173,10 @@ export default async function handler(req, res) {
     if (!b64) throw new Error('Нет изображения от LinkAPI');
     b64 = b64.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
 
-    // ImgBB
+    // ---- ImgBB (обязательный ключ) ----
     console.log('☁️ [8/9] Загрузка на ImgBB...');
     const form = new FormData();
-    form.append('key', finalImgbbKey);
+    form.append('key', imgbb_key);
     form.append('image', b64);
     form.append('name', `gen_${Date.now()}`);
     const imgRes = await fetch('https://api.imgbb.com/1/upload', { method: 'POST', body: form });
@@ -186,7 +187,7 @@ export default async function handler(req, res) {
     const imageUrl = imgData.data.url;
     console.log(`✅ [8/9] Изображение готово (ссылка скрыта)`);
 
-    // Сохраняем в кэш
+    // ---- Сохранение в кэш ----
     if (redis) {
       try {
         await redis.set(cacheKey, imageUrl, 'EX', 604800);
@@ -194,7 +195,7 @@ export default async function handler(req, res) {
       } catch(e) { console.warn('Redis set error:', e.message); }
     }
 
-    // Редирект (ссылка не показывается в логах)
+    // Редирект на изображение
     return res.redirect(302, imageUrl);
   } catch (err) {
     console.error('❌ Ошибка:', err.message);
