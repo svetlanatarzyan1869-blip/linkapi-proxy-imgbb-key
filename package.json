@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "ioredis": "^5.10.1"
   }
 }
