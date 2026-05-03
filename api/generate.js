@@ -1,15 +1,19 @@
-// api/generate.js – шифруются только key и imgbb_key
+// api/generate.js
 import Redis from 'ioredis';
 import { createRequire } from 'module';
 import crypto from 'crypto';
 
 const require = createRequire(import.meta.url);
 
+// ---------- Расшифровка с нормализацией base64 ----------
 function decryptData(encryptedBase64, secretKeyBase64) {
   try {
     let normalized = encryptedBase64.replace(/ /g, '+').replace(/-/g, '+').replace(/_/g, '/');
     const parts = normalized.split(':');
-    if (parts.length !== 2) return null;
+    if (parts.length !== 2) {
+      console.error('Invalid format: expected iv:encrypted, got', parts.length);
+      return null;
+    }
     const [ivBase64, encryptedBase64Data] = parts;
     const iv = Buffer.from(ivBase64, 'base64');
     const encrypted = Buffer.from(encryptedBase64Data, 'base64');
@@ -24,17 +28,17 @@ function decryptData(encryptedBase64, secretKeyBase64) {
   }
 }
 
-// Загрузка стилей
+// ---------- Загрузка стилей из styles.json ----------
 let styleMap = {};
 try {
   styleMap = require('./styles.json');
   console.log(`✅ [1/9] Загружено стилей: ${Object.keys(styleMap).length}`);
 } catch (err) {
-  console.error('❌ styles.json error:', err.message);
-  throw new Error('styles.json missing');
+  console.error('❌ [1/9] Ошибка загрузки styles.json:', err.message);
+  throw new Error('styles.json not found or invalid');
 }
 
-// Redis (опционально)
+// ---------- Redis ----------
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL;
 let redis = null;
 if (redisUrl) {
@@ -59,13 +63,14 @@ export default async function handler(req, res) {
   try {
     console.log('🚀 [2/9] Начало запроса');
     const encryptionKey = process.env.ENCRYPTION_KEY;
-    let key, imgbb_key;
+    let key, charactersRaw, imgbb_key;
 
-    // Расшифровка только key и imgbb_key
+    // ---- Получение зашифрованной части (key, characters, imgbb_key) ----
     if (req.query.data && encryptionKey) {
       const decrypted = decryptData(req.query.data, encryptionKey);
       if (decrypted && typeof decrypted === 'object') {
         key = decrypted.key;
+        charactersRaw = decrypted.characters;
         imgbb_key = decrypted.imgbb_key;
         console.log('✅ [3/9] Данные расшифрованы');
       } else {
@@ -73,16 +78,16 @@ export default async function handler(req, res) {
         return res.status(400).send('Invalid encrypted data');
       }
     } else {
-      // fallback старый
+      // fallback для старых версий (без шифрования)
       key = req.query.key;
+      charactersRaw = req.query.characters;
       imgbb_key = req.query.imgbb_key;
-      console.log('⚠️ [3/9] Незашифрованный запрос');
+      console.log('⚠️ [3/9] Используется незашифрованный запрос (устаревший)');
     }
 
-    // Открытые параметры
+    // ---- Эти параметры всегда из URL (не секретные) ----
     const userId = req.query.userId;
     const prompt = req.query.prompt;
-    const charactersRaw = req.query.characters;   // остаётся открытым
     const style = req.query.style;
     const model = req.query.model || 'gemini-3.1-flash-image-preview';
 
@@ -94,19 +99,20 @@ export default async function handler(req, res) {
       console.error('❌ [3/9] Отсутствует imgbb_key');
       return res.status(400).send('Missing imgbb_key');
     }
-    console.log(`✅ [3/9] userId: ${userId}`);
+    console.log(`✅ [3/9] Параметры получены (userId: ${userId})`);
 
-    // Стиль
+    // ---- Обработка стиля: если нет или не найден → kodak_portra_400 ----
     let finalStyle = style;
     if (style && styleMap[style.toLowerCase()]) {
       finalStyle = styleMap[style.toLowerCase()];
       console.log(`🎨 [4/9] Стиль "${style}" заменён`);
     } else {
-      const defaultStyle = 'kodak_portra_400';
-      if (styleMap[defaultStyle]) {
-        finalStyle = styleMap[defaultStyle];
-        console.log(`🎨 [4/9] Стиль по умолчанию ${defaultStyle}`);
+      const defaultStyleName = 'kodak_portra_400';
+      if (styleMap[defaultStyleName]) {
+        finalStyle = styleMap[defaultStyleName];
+        console.log(`🎨 [4/9] Стиль не указан или не найден, использован ${defaultStyleName}`);
       } else {
+        console.error(`❌ [4/9] Стиль по умолчанию ${defaultStyleName} не найден в styles.json`);
         return res.status(500).send('Default style missing');
       }
     }
@@ -114,39 +120,74 @@ export default async function handler(req, res) {
     const fullPrompt = `${finalStyle}\n\n${prompt}`;
     const messages = [{ role: "user", content: [{ type: "text", text: fullPrompt }] }];
 
-    // Кэш
+    // ---- Кэш и блокировка для предотвращения гонки ----
     const cacheKey = getCacheKey(userId, prompt, charactersRaw, finalStyle);
     let cachedUrl = null;
+    let lockAcquired = false;
+    const lockKey = `lock:${cacheKey}`;
+
     if (redis) {
       console.log('🔄 [5/9] Проверка кэша...');
-      try { cachedUrl = await redis.get(cacheKey); } catch(e) {}
+      try {
+        cachedUrl = await redis.get(cacheKey);
+      } catch(e) { console.warn('Redis error:', e.message); }
+
+      if (!cachedUrl) {
+        // Пытаемся захватить блокировку на 2 секунды
+        const locked = await redis.set(lockKey, 'locked', 'EX', 2, 'NX');
+        if (locked) {
+          lockAcquired = true;
+          console.log(`🔒 Блокировка получена для ${cacheKey}`);
+        } else {
+          console.log(`⏳ Ожидание блокировки для ${cacheKey}`);
+          await new Promise(resolve => setTimeout(resolve, 600));
+          const retryCache = await redis.get(cacheKey);
+          if (retryCache) {
+            console.log(`✅ Кэш получен после ожидания блокировки`);
+            return res.redirect(302, retryCache);
+          } else {
+            // Форс-мажор: блокировка висит, но кэша нет — снимаем её и генерируем сами
+            await redis.del(lockKey);
+          }
+        }
+      }
+    } else {
+      console.log('⚠️ [5/9] Redis не настроен, кэш отключён');
     }
-    if (cachedUrl) {
-      console.log(`✅ [5/9] Кэш попадание`);
+
+    if (cachedUrl && typeof cachedUrl === 'string') {
+      console.log(`✅ [5/9] Кэш попадание (ссылка скрыта)`);
       return res.redirect(302, cachedUrl);
     }
-    console.log('❌ [5/9] Кэш промах');
+    console.log('❌ [5/9] Кэш промах, генерация');
 
-    // Референсы
+    // ---- Референсы персонажей ----
     let chars = [];
-    try { chars = JSON.parse(charactersRaw || '[]'); } catch(e) { console.warn('Ошибка characters'); }
+    try { chars = JSON.parse(charactersRaw || '[]'); } catch(e) { console.warn('Ошибка парсинга characters'); }
     console.log(`📸 [6/9] Референсов: ${chars.length}`);
     for (const c of chars) {
       if (!c.url) continue;
       try {
-        const imgRes = await fetch(c.url);
-        if (!imgRes.ok) throw new Error(`HTTP ${imgRes.status}`);
+        const imgRes = await fetch(c.url, { headers: { 'Accept': 'image/*' } });
+        if (!imgRes.ok) {
+          console.warn(`   ⚠️ "${c.name}": HTTP ${imgRes.status}`);
+          continue;
+        }
+        const contentType = imgRes.headers.get('content-type');
+        if (!contentType || !contentType.startsWith('image/')) {
+          console.warn(`   ⚠️ "${c.name}": не изображение (${contentType}), пропускаем`);
+          continue;
+        }
         const buf = await imgRes.arrayBuffer();
         const base64 = Buffer.from(buf).toString('base64');
-        const ct = imgRes.headers.get('content-type') || 'image/jpeg';
-        messages[0].content.push({ type: "image_url", image_url: { url: `data:${ct};base64,${base64}` } });
-        console.log(`   ✅ ${c.name}`);
+        messages[0].content.push({ type: "image_url", image_url: { url: `data:${contentType};base64,${base64}` } });
+        console.log(`   ✅ Референс "${c.name}" загружен`);
       } catch(e) {
-        console.warn(`   ⚠️ ${c.name}: ${e.message}`);
+        console.warn(`   ⚠️ "${c.name}": ${e.message}`);
       }
     }
 
-    // LinkAPI
+    // ---- LinkAPI ----
     console.log('🤖 [7/9] Запрос в LinkAPI...');
     const linkRes = await fetch('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
@@ -168,7 +209,7 @@ export default async function handler(req, res) {
     if (!b64) throw new Error('Нет изображения от LinkAPI');
     b64 = b64.replace(/^data:image\/\w+;base64,/, '').replace(/\s/g, '');
 
-    // ImgBB
+    // ---- ImgBB ----
     console.log('☁️ [8/9] Загрузка на ImgBB...');
     const form = new FormData();
     form.append('key', imgbb_key);
@@ -180,15 +221,18 @@ export default async function handler(req, res) {
       throw new Error(`ImgBB error: ${imgData.error?.message || 'unknown'}`);
     }
     const imageUrl = imgData.data.url;
-    console.log(`✅ [8/9] Изображение готово`);
+    console.log(`✅ [8/9] Изображение готово (ссылка скрыта)`);
 
+    // ---- Сохраняем в кэш и снимаем блокировку ----
     if (redis) {
       try {
         await redis.set(cacheKey, imageUrl, 'EX', 604800);
-        console.log(`💾 [9/9] Кэш сохранён`);
-      } catch(e) {}
+        if (lockAcquired) await redis.del(lockKey);
+        console.log(`💾 [9/9] Сохранено в кэш`);
+      } catch(e) { console.warn('Redis set error:', e.message); }
     }
 
+    // Редирект на изображение
     return res.redirect(302, imageUrl);
   } catch (err) {
     console.error('❌ Ошибка:', err.message);
