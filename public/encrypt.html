@@ -88,9 +88,9 @@
         const encryptedBase64 = btoa(String.fromCharCode(...new Uint8Array(encrypted)));
 
         if (isRift) {
-            // RiftAI: разделитель -- и полное URL-кодирование
-            const combined = `${ivBase64}--${encryptedBase64}`;
-            return combined.replace(/\+/g, '%2B').replace(/\//g, '%2F').replace(/=/g, '%3D');
+            // RiftAI: разделитель -- и полное URL-кодирование каждой части отдельно
+            const encode = s => s.replace(/\+/g, '%2B').replace(/\//g, '%2F').replace(/=/g, '%3D');
+            return `${encode(ivBase64)}--${encode(encryptedBase64)}`;
         } else {
             // LinkAPI: старый формат с :
             return `${ivBase64}:${encryptedBase64}`;
