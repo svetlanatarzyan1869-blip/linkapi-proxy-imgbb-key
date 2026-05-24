@@ -96,7 +96,8 @@
         const encrypted = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, cryptoKey, data);
         const ivBase64 = btoa(String.fromCharCode(...iv));
         const encryptedBase64 = btoa(String.fromCharCode(...new Uint8Array(encrypted)));
-        return `${ivBase64}:${encryptedBase64}`;
+        return `${ivBase64}:${encryptedBase64}`.replace(/\+/g, '%2B').replace(/\//g, '%2F').replace(/=/g, '%3D');
+
     }
 
     async function encrypt(provider) {
