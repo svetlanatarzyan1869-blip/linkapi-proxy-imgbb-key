@@ -301,6 +301,20 @@ export default async function handler(req, res) {
       console.log('⚠️ [3/9] Незашифрованный запрос');
     }
 
+    // Чистим ключи от «умных» символов (автозамена телефона: – — → -, неразрывные пробелы, кавычки)
+    // и от любых non-ASCII, чтобы не падал HTTP-заголовок Authorization (ByteString ошибка)
+    function sanitizeKey(k){
+      if (!k || typeof k !== 'string') return k;
+      return k
+        .replace(/[\u2010-\u2015\u2212]/g, '-')   // разные тире/минусы → дефис
+        .replace(/[\u2018\u2019\u201C\u201D]/g, '') // умные кавычки → убрать
+        .replace(/[\u00A0\u2000-\u200B]/g, '')      // неразрывные/тонкие пробелы → убрать
+        .replace(/[^\x00-\x7F]/g, '')               // всё остальное не-ASCII → убрать
+        .trim();
+    }
+    key = sanitizeKey(key);
+    imgbb_key = sanitizeKey(imgbb_key);
+
     if (charactersRaw && typeof charactersRaw === 'string' && charactersRaw.includes('%')) {
       try {
         charactersRaw = decodeURIComponent(charactersRaw);
