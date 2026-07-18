@@ -338,11 +338,16 @@ export default async function handler(req, res) {
     }
     console.log(`✅ [3/9] userId: ${userId}, model: ${model}`);
 
-    // Стиль
-    let finalStyle = style;
+    // Стиль: ключ из каталога → его описание; иначе произвольный текст юзера как есть;
+    // иначе дефолт. Лимит — чтобы длинное полотно не съедало таймаут генерации.
+    const MAX_STYLE_LEN = 300;
+    let finalStyle;
     if (style && styleMap[style.toLowerCase()]) {
       finalStyle = styleMap[style.toLowerCase()];
       console.log(`🎨 [4/9] Стиль "${style}" заменён`);
+    } else if (style && style.trim()) {
+      finalStyle = style.trim().slice(0, MAX_STYLE_LEN);
+      console.log(`🎨 [4/9] Кастомный стиль (${finalStyle.length} симв.)`);
     } else {
       const defaultStyle = 'kodak_portra_400';
       finalStyle = styleMap[defaultStyle] || "Kodak Portra 400 film look";
@@ -370,15 +375,18 @@ export default async function handler(req, res) {
     const fullPrompt = `${finalStyle}\n\n${cleanPrompt}${faceLock}`;
 
     // ---- Кэш и блокировка ----
-    // Реролл: если есть _r — пропускаем чтение кэша (но запишем свежий результат)
-    const isReroll = !!req.query._r;
-    if (isReroll) console.log('🔁 Реролл — кэш пропускается');
-    const cacheKey = getCacheKey(userId, prompt, charactersRaw, finalStyle);
+    // Каждый реролл кэшируется ОТДЕЛЬНО — по своему _r, и кэш читается ВСЕГДА.
+    // Клиент сохраняет URL реролла в историю; при листании он запрашивается снова,
+    // и раньше _r отключал кэш → каждое листание жгло кредиты заново.
+    // Теперь: новый _r = новая генерация, повтор того же _r = отдача из кэша.
+    const rerollTag = String(req.query._r || '');
+    const isReroll = !!rerollTag;
+    const cacheKey = getCacheKey(userId, prompt, charactersRaw, finalStyle + '|m=' + model + '|r=' + rerollTag);
     let cachedUrl = null;
     let lockAcquired = false;
     const lockKey = `lock:${cacheKey}`;
 
-    if (redis && !isReroll) {
+    if (redis) {
       console.log('🔄 [5/9] Проверка кэша...');
       try { cachedUrl = await redis.get(cacheKey); } catch(e) { console.warn('Redis error:', e.message); }
       if (!cachedUrl) {
