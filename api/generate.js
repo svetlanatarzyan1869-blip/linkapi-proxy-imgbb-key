@@ -195,22 +195,40 @@ function getCacheKey(userId, prompt, characters, style) {
   return `img:${hash}`;
 }
 
-async function fetchImageBuffer(url) {
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), timeoutMs);
+  try { return await fetch(url, { ...options, signal: ctrl.signal }); }
+  finally { clearTimeout(to); }
+}
+
+async function fetchImageBuffer(url, timeoutMs = 15000) {
   // Авто-фикс ссылки на страницу ImgBB → прямую ссылку
   if (/^https?:\/\/ibb\.co\/[a-zA-Z0-9]+$/.test(url)) {
     try {
-      const pageRes = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const pageRes = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 8000);
       const html = await pageRes.text();
       const match = html.match(/https:\/\/i\.ibb\.co\/[^"'\s]+\.(?:jpg|jpeg|png|webp|gif)/i);
       if (match) { console.log(`🔗 Fixed ImgBB URL: ${url} → ${match[0]}`); url = match[0]; }
     } catch(e) { console.warn('ImgBB URL fix failed:', e.message); }
   }
-  const res = await fetch(url, { headers: { Accept: 'image/*' } });
+  const res = await fetchWithTimeout(url, { headers: { Accept: 'image/*' } }, timeoutMs);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const contentType = res.headers.get('content-type') || 'image/png';
   if (!contentType.startsWith('image/')) throw new Error(`Not an image: ${contentType}`);
   const buf = Buffer.from(await res.arrayBuffer());
   return { buf, contentType };
+}
+
+// Кэш буфера референса в Redis по URL: качаем ОДИН раз (медленный ibb.co),
+// рероллы и повторные генерации берут data:URL из кэша мгновенно.
+async function getRefDataUrl(url, redis) {
+  const key = 'ref:' + crypto.createHash('sha1').update(url).digest('hex');
+  if (redis) { try { const c = await redis.get(key); if (c) return c; } catch (e) {} }
+  const { buf, contentType } = await fetchImageBuffer(url, 15000);
+  const dataUrl = `data:${contentType};base64,${buf.toString('base64')}`;
+  if (redis) { try { await redis.set(key, dataUrl, 'EX', 604800); } catch (e) {} }
+  return dataUrl;
 }
 
 function extFromContentType(ct) {
@@ -427,15 +445,17 @@ export default async function handler(req, res) {
 
     console.log('🤖 [7/9] Запрос в LinkAPI...');
     const messages = [{ role: 'user', content: [{ type: 'text', text: fullPrompt }] }];
-    for (const c of chars) {
-      if (!c.url) continue;
+    // Референсы — ПАРАЛЛЕЛЬНО, с таймаутом (15с) и кэшем в Redis.
+    // Медленный/битый реф не роняет весь запрос (пропускаем его), а не ждём до 60с последовательно.
+    const refResults = await Promise.all(chars.map(async (c) => {
+      if (!c.url) return null;
       try {
-        const { buf, contentType } = await fetchImageBuffer(c.url);
-        const base64 = buf.toString('base64');
-        messages[0].content.push({ type: 'image_url', image_url: { url: `data:${contentType};base64,${base64}` } });
-        console.log(`   ✅ "${c.name}" загружен (${buf.length} bytes)`);
-      } catch(e) { console.warn(`   ⚠️ "${c.name}": ${e.message}`); }
-    }
+        const dataUrl = await getRefDataUrl(c.url, redis);
+        console.log(`   ✅ "${c.name}" готов`);
+        return dataUrl;
+      } catch (e) { console.warn(`   ⚠️ "${c.name}" пропущен: ${e.message}`); return null; }
+    }));
+    for (const du of refResults) { if (du) messages[0].content.push({ type: 'image_url', image_url: { url: du } }); }
     const linkRes = await fetchWithRetry('https://api.linkapi.ai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
