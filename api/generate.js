@@ -5,7 +5,9 @@ import crypto from 'crypto';
 
 const require = createRequire(import.meta.url);
 
-export const maxDuration = 300;
+// Vercel Hobby жёстко режет функцию на 60с (log: «Task timed out after 60 seconds»),
+// значение >60 просто клампится. Поднять до 300 ТОЛЬКО после перехода на Pro.
+export const maxDuration = 60;
 
 // ---------- SVG-ошибка ----------
 function errorSvg(res, title, advice) {
