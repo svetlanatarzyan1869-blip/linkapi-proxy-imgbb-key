@@ -22,19 +22,22 @@ function errorSvg(res, title, advice) {
     if (line) out.push(line.trim());
     return out;
   };
-  const titleLines = wrap(title, 48);
-  const adviceLines = advice ? wrap(advice, 56) : [];
-  const lineH = 20;
-  let y = 70;
+  // Узкий viewBox (440) → тот же <img width:100%> растягивает SVG на всю карточку,
+  // а текст относительно ширины становится крупнее (особенно заметно на телефоне).
+  const W = 440, CX = 220;
+  const titleLines = wrap(title, 30);
+  const adviceLines = advice ? wrap(advice, 34) : [];
+  const lineH = 26;
+  let y = 78;
   const titleRows = titleLines.map((l,i) =>
-    `<text x="340" y="${y + i*22}" font-family="system-ui,sans-serif" font-size="16" font-weight="600" fill="#f0e6ff" text-anchor="middle">${esc(l)}</text>`
+    `<text x="${CX}" y="${y + i*28}" font-family="system-ui,sans-serif" font-size="21" font-weight="600" fill="#f0e6ff" text-anchor="middle">${esc(l)}</text>`
   ).join('\n  ');
-  y += titleLines.length * 22 + 8;
+  y += titleLines.length * 28 + 10;
   const adviceRows = adviceLines.map((l,i) =>
-    `<text x="340" y="${y + i*lineH}" font-family="system-ui,sans-serif" font-size="13" fill="#9d8fc4" text-anchor="middle">${esc(l)}</text>`
+    `<text x="${CX}" y="${y + i*lineH}" font-family="system-ui,sans-serif" font-size="16" fill="#9d8fc4" text-anchor="middle">${esc(l)}</text>`
   ).join('\n  ');
-  const totalH = Math.max(160, y + adviceLines.length * lineH + 24);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="680" height="${totalH}" viewBox="0 0 680 ${totalH}">
+  const totalH = Math.max(170, y + adviceLines.length * lineH + 28);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${totalH}" viewBox="0 0 ${W} ${totalH}">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#1a1018"/>
@@ -53,6 +56,13 @@ function errorSvg(res, title, advice) {
   ${titleRows}
   ${adviceRows}
 </svg>`;
+  // Текст ошибки — ещё и в заголовке: новый плагин читает его и рисует ошибку
+  // как HTML внутри карточки (сам переносится по ширине + берёт цвета темы).
+  // Старые клиенты просто показывают SVG-картинку (обратная совместимость).
+  try {
+    res.setHeader('Access-Control-Expose-Headers', 'X-ImageGen-Error');
+    res.setHeader('X-ImageGen-Error', Buffer.from(JSON.stringify({ title: String(title||''), advice: String(advice||'') }), 'utf-8').toString('base64'));
+  } catch(e) {}
   res.setHeader('Content-Type', 'image/svg+xml');
   return res.status(200).send(svg);
 }
@@ -100,7 +110,9 @@ function friendlyErrorObj(raw) {
   if (/No image from LinkAPI/i.test(s) || /Нет изображения/i.test(s))
     return {title:'LinkAPI не вернул изображение', advice:'Попробуй ещё раз или смени модель'};
   if (/Invalid API v1 key/i.test(s) || /imgbb.*key/i.test(s))
-    return {title:'Неверный ImgBB ключ', advice:'Перешифруй данные заново на сайте настройки'};
+    return {title:'ImgBB отклонил загрузку', advice:'Если ключ точно верный — это временный лимит ImgBB (много картинок подряд), подожди минуту. Иначе перешифруй данные на сайте'};
+  if (/imgbb.*(rate|limit|too many|429)/i.test(s))
+    return {title:'Лимит ImgBB', advice:'Слишком много загрузок подряд. Подожди минуту и попробуй снова'};
   if (/Invalid encrypted data/i.test(s) || /Missing key/i.test(s))
     return {title:'Неверный ключ конфигурации', advice:'Перешифруй данные на сайте настройки'};
   if (/Missing imgbb/i.test(s))
