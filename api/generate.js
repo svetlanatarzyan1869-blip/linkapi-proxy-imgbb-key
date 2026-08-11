@@ -184,7 +184,15 @@ try {
 const redisUrl = process.env.REDIS_URL || process.env.KV_URL;
 let redis = null;
 if (redisUrl) {
-  redis = new Redis(redisUrl);
+  // Таймауты ОБЯЗАТЕЛЬНЫ: на serverless голый ioredis виснет на первом get
+  // (лимит соединений / холодный старт) и держит всю функцию до maxDuration.
+  // commandTimeout режет любую зависшую команду → код ловит и просто пропускает кэш.
+  redis = new Redis(redisUrl, {
+    connectTimeout: 3000,
+    commandTimeout: 3000,
+    maxRetriesPerRequest: 2,
+    retryStrategy: (times) => (times > 3 ? null : Math.min(times * 200, 1000)),
+  });
   redis.on('error', (err) => console.warn('Redis warning:', err.message));
 }
 
@@ -425,20 +433,24 @@ export default async function handler(req, res) {
 
     if (redis) {
       console.log('🔄 [5/9] Проверка кэша...');
-      try { cachedUrl = await redis.get(cacheKey); } catch(e) { console.warn('Redis error:', e.message); }
-      if (!cachedUrl) {
-        const locked = await redis.set(lockKey, 'locked', 'EX', 2, 'NX');
-        if (locked) {
-          lockAcquired = true;
-          console.log(`🔒 Блокировка получена`);
-        } else {
-          console.log(`⏳ Ожидание блокировки`);
-          await new Promise(resolve => setTimeout(resolve, 600));
-          const retryCache = await redis.get(cacheKey);
-          if (retryCache) return res.redirect(302, retryCache);
-          else await redis.del(lockKey);
+      // ВЕСЬ блок кэша/лока обёрнут: любой сбой/таймаут Redis → просто генерим без кэша,
+      // а не вешаем функцию. Раньше get был в try/catch, но set/del — нет (могли уронить/повесить).
+      try {
+        cachedUrl = await redis.get(cacheKey);
+        if (!cachedUrl) {
+          const locked = await redis.set(lockKey, 'locked', 'EX', 2, 'NX');
+          if (locked) {
+            lockAcquired = true;
+            console.log(`🔒 Блокировка получена`);
+          } else {
+            console.log(`⏳ Ожидание блокировки`);
+            await new Promise(resolve => setTimeout(resolve, 600));
+            const retryCache = await redis.get(cacheKey);
+            if (retryCache) return res.redirect(302, retryCache);
+            else await redis.del(lockKey);
+          }
         }
-      }
+      } catch(e) { console.warn('Redis error (пропускаю кэш):', e.message); cachedUrl = null; }
     }
     if (cachedUrl) return res.redirect(302, cachedUrl);
     console.log(isReroll ? '🔁 [5/9] Генерация (реролл)' : '❌ [5/9] Кэш промах, генерация');
