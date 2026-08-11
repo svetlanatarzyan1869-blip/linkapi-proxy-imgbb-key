@@ -50,11 +50,11 @@ function errorSvg(res, title, advice) {
       <stop offset="100%" stop-color="#ec4899"/>
     </linearGradient>
   </defs>
-  <rect width="680" height="${totalH}" rx="16" fill="url(#bg)" stroke="url(#accent)" stroke-width="1.5" stroke-opacity="0.4"/>
-  <circle cx="340" cy="34" r="14" fill="none" stroke="url(#accent)" stroke-width="2">
+  <rect width="${W}" height="${totalH}" rx="16" fill="url(#bg)" stroke="url(#accent)" stroke-width="1.5" stroke-opacity="0.4"/>
+  <circle cx="${CX}" cy="40" r="15" fill="none" stroke="url(#accent)" stroke-width="2">
     <animate attributeName="stroke-opacity" values="1;0.3;1" dur="1.8s" repeatCount="indefinite"/>
   </circle>
-  <text x="340" y="40" font-family="system-ui,sans-serif" font-size="16" fill="#ec4899" text-anchor="middle">!</text>
+  <text x="${CX}" y="46" font-family="system-ui,sans-serif" font-size="17" fill="#ec4899" text-anchor="middle">!</text>
   ${titleRows}
   ${adviceRows}
 </svg>`;
